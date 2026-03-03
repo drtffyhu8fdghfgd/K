@@ -13,6 +13,7 @@
       background: #000;
       color: white;
       font-family: sans-serif;
+      zoom: 0.9;
     }
 
     #gallery {
@@ -50,6 +51,9 @@
       font-size: 1.2rem;
       z-index: 9999;
       gap: 20px;
+      opacity: 1;
+      transition: opacity 0.5s ease-in-out;
+      pointer-events: none;
     }
 
     #progress-bar-wrap {
@@ -105,7 +109,7 @@
       return new Promise(resolve => {
         const v = document.createElement('video');
         v.src = url;
-        v.preload = 'auto'; // start buffering right away
+        v.preload = 'auto';
         v.muted = true;
         v.playsInline = true;
         v.loop = true;
@@ -120,14 +124,13 @@
       });
     }
 
-    // Returns a promise that resolves when the video has buffered >= targetFraction of its duration
     function waitForBuffer(vidObj, targetFraction) {
       return new Promise(resolve => {
         const v = vidObj.el;
 
         function check() {
           if (!v.duration) return;
-          if (v.readyState >= 4) { resolve(); return; } // fully loaded
+          if (v.readyState >= 4) { resolve(); return; }
           if (v.buffered.length > 0) {
             const bufferedEnd = v.buffered.end(v.buffered.length - 1);
             if (bufferedEnd / v.duration >= targetFraction) {
@@ -139,7 +142,7 @@
 
         v.addEventListener('progress', check);
         v.addEventListener('canplaythrough', resolve, { once: true });
-        check(); // check immediately in case already buffered
+        check();
       });
     }
 
@@ -150,21 +153,19 @@
     }
 
     async function loadVideos() {
-      // 1. Fetch list
       document.getElementById('loading-label').textContent = 'Fetching list…';
       const urls = await getVideoUrls();
-      const total = urls.length;
 
-      // 2. Load metadata for all videos simultaneously (also kicks off preload='auto' buffering)
       document.getElementById('loading-label').textContent = 'Buffering videos…';
-      updateProgress(0, total);
+      updateProgress(0, urls.length);
 
+      // Kick off metadata + preload='auto' for ALL videos simultaneously
       const metas = (await Promise.all(urls.map(getMetadata))).filter(Boolean);
 
-      // 3. Wait for each video to reach 50% buffered, update progress as they come in
       let done = 0;
       updateProgress(0, metas.length);
 
+      // Wait for every video to hit 50% buffered, track progress as each finishes
       await Promise.all(
         metas.map(async vid => {
           await waitForBuffer(vid, 0.5);
@@ -173,16 +174,25 @@
         })
       );
 
-      // 4. Build and show gallery
+      // Build gallery DOM (reuses the already-buffering video elements)
       renderRows(metas);
-      document.getElementById('loading').style.display = 'none';
-      document.getElementById('gallery').style.opacity = 1;
 
-      // 5. Play all simultaneously
+      // Play all at once before revealing so first frame is ready
       for (const vid of metas) {
         vid.el.play().catch(() => {});
       }
-      // Background buffering continues automatically
+
+      // Crossfade: both transitions run simultaneously
+      const loadingEl = document.getElementById('loading');
+      const galleryEl = document.getElementById('gallery');
+
+      loadingEl.style.opacity = '0';
+      galleryEl.style.opacity = '1';
+
+      loadingEl.addEventListener('transitionend', () => {
+        loadingEl.style.display = 'none';
+      }, { once: true });
+      // Each video continues buffering the remaining 50% in the background automatically
     }
 
     function renderRows(videos) {
@@ -217,10 +227,10 @@
       const height = containerWidth / totalAspect;
 
       for (const vid of rowVids) {
-        const el = vid.el; // reuse the already-buffering element
+        const el = vid.el;
         el.width = height * vid.aspect;
         el.height = height;
-        el.autoplay = false; // we call play() manually after all are ready
+        el.autoplay = false;
         el.muted = true;
 
         el.addEventListener('mouseenter', () => {
@@ -246,4 +256,3 @@
   </script>
 </body>
 </html>
-

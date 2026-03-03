@@ -21,7 +21,7 @@
       justify-content: center;
       padding: 4px;
       opacity: 0;
-      transition: opacity 0.5s ease-in-out;
+      transition: opacity 0.4s ease-in-out;
     }
 
     .row {
@@ -65,7 +65,7 @@
       width: 0%;
       background: #fff;
       border-radius: 2px;
-      transition: width 0.2s ease;
+      transition: width 0.15s ease;
     }
 
     #progress-text {
@@ -82,7 +82,7 @@
     <div id="progress-bar-wrap">
       <div id="progress-bar"></div>
     </div>
-    <div id="progress-text">0 / 0</div>
+    <div id="progress-text"></div>
   </div>
   <div id="gallery"></div>
 
@@ -101,48 +101,17 @@
         .map(f => `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${f.path}`);
     }
 
-    function updateProgress(done, total) {
-      const pct = total ? (done / total) * 100 : 0;
-      document.getElementById('progress-bar').style.width = pct + '%';
-      document.getElementById('progress-text').textContent = `${done} / ${total}`;
-    }
-
-    // Fetch a single video URL into a blob, return a blob URL
-    async function fetchBlob(url) {
-      const res = await fetch(url);
-      const blob = await res.blob();
-      return URL.createObjectURL(blob);
-    }
-
-    // Load all videos into RAM as blob URLs, with progress tracking
-    async function preloadAllBlobs(urls) {
-      const blobUrls = new Array(urls.length).fill(null);
-      let done = 0;
-      updateProgress(0, urls.length);
-
-      await Promise.all(
-        urls.map(async (url, i) => {
-          try {
-            blobUrls[i] = await fetchBlob(url);
-          } catch (e) {
-            blobUrls[i] = null;
-          }
-          done++;
-          updateProgress(done, urls.length);
-        })
-      );
-
-      return blobUrls;
-    }
-
-    // Get video dimensions from a blob URL
-    function getVideoDimensions(blobUrl) {
+    function getMetadata(url) {
       return new Promise(resolve => {
         const v = document.createElement('video');
-        v.src = blobUrl;
-        v.preload = 'metadata';
+        v.src = url;
+        v.preload = 'auto'; // start buffering right away
+        v.muted = true;
+        v.playsInline = true;
+        v.loop = true;
         v.onloadedmetadata = () => resolve({
-          blobUrl,
+          url,
+          el: v,
           w: v.videoWidth,
           h: v.videoHeight,
           aspect: v.videoWidth / v.videoHeight
@@ -151,23 +120,69 @@
       });
     }
 
+    // Returns a promise that resolves when the video has buffered >= targetFraction of its duration
+    function waitForBuffer(vidObj, targetFraction) {
+      return new Promise(resolve => {
+        const v = vidObj.el;
+
+        function check() {
+          if (!v.duration) return;
+          if (v.readyState >= 4) { resolve(); return; } // fully loaded
+          if (v.buffered.length > 0) {
+            const bufferedEnd = v.buffered.end(v.buffered.length - 1);
+            if (bufferedEnd / v.duration >= targetFraction) {
+              resolve();
+              return;
+            }
+          }
+        }
+
+        v.addEventListener('progress', check);
+        v.addEventListener('canplaythrough', resolve, { once: true });
+        check(); // check immediately in case already buffered
+      });
+    }
+
+    function updateProgress(done, total) {
+      const pct = total ? (done / total) * 100 : 0;
+      document.getElementById('progress-bar').style.width = pct + '%';
+      document.getElementById('progress-text').textContent = `${done} / ${total} videos buffered`;
+    }
+
     async function loadVideos() {
+      // 1. Fetch list
       document.getElementById('loading-label').textContent = 'Fetching list…';
       const urls = await getVideoUrls();
+      const total = urls.length;
 
-      document.getElementById('loading-label').textContent = 'Loading videos…';
-      const blobUrls = await preloadAllBlobs(urls);
+      // 2. Load metadata for all videos simultaneously (also kicks off preload='auto' buffering)
+      document.getElementById('loading-label').textContent = 'Buffering videos…';
+      updateProgress(0, total);
 
-      document.getElementById('loading-label').textContent = 'Reading metadata…';
-      const metas = await Promise.all(
-        blobUrls.filter(Boolean).map(getVideoDimensions)
+      const metas = (await Promise.all(urls.map(getMetadata))).filter(Boolean);
+
+      // 3. Wait for each video to reach 50% buffered, update progress as they come in
+      let done = 0;
+      updateProgress(0, metas.length);
+
+      await Promise.all(
+        metas.map(async vid => {
+          await waitForBuffer(vid, 0.5);
+          done++;
+          updateProgress(done, metas.length);
+        })
       );
 
-      renderRows(metas.filter(Boolean));
-
+      // 4. Build and show gallery
+      renderRows(metas);
       document.getElementById('loading').style.display = 'none';
-      const gallery = document.getElementById('gallery');
-      gallery.style.opacity = 1;
+      document.getElementById('gallery').style.opacity = 1;
+
+      // 5. Play all simultaneously
+      for (const vid of metas) {
+        vid.el.play().catch(() => {});
+      }
+      // Background buffering continues automatically
     }
 
     function renderRows(videos) {
@@ -202,21 +217,16 @@
       const height = containerWidth / totalAspect;
 
       for (const vid of rowVids) {
-        const el = document.createElement('video');
-        el.src = vid.blobUrl;  // use in-memory blob URL
+        const el = vid.el; // reuse the already-buffering element
         el.width = height * vid.aspect;
         el.height = height;
-
-        el.autoplay = true;
-        el.loop = true;
+        el.autoplay = false; // we call play() manually after all are ready
         el.muted = true;
-        el.playsInline = true;
 
         el.addEventListener('mouseenter', () => {
           el.muted = false;
           el.volume = 1.0;
         });
-
         el.addEventListener('mouseleave', () => {
           el.muted = true;
         });
@@ -236,3 +246,4 @@
   </script>
 </body>
 </html>
+

@@ -44,16 +44,46 @@
       background: #000;
       color: #fff;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      font-size: 1.5rem;
+      font-size: 1.2rem;
       z-index: 9999;
+      gap: 20px;
+    }
+
+    #progress-bar-wrap {
+      width: 260px;
+      height: 4px;
+      background: #222;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    #progress-bar {
+      height: 100%;
+      width: 0%;
+      background: #fff;
+      border-radius: 2px;
+      transition: width 0.2s ease;
+    }
+
+    #progress-text {
+      font-size: 0.85rem;
+      color: #888;
+      letter-spacing: 0.05em;
     }
   </style>
 </head>
 <body>
 
-  <div id="loading">Loading...</div>
+  <div id="loading">
+    <div id="loading-label">Loading…</div>
+    <div id="progress-bar-wrap">
+      <div id="progress-bar"></div>
+    </div>
+    <div id="progress-text">0 / 0</div>
+  </div>
   <div id="gallery"></div>
 
   <script>
@@ -61,44 +91,82 @@
     const repo = 'h';
     const branch = 'main';
 
-    async function getVideos() {
+    async function getVideoUrls() {
       const res = await fetch(
         `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`
       );
       const data = await res.json();
-
       return data.tree
         .filter(f => f.type === 'blob' && f.path.toLowerCase().endsWith('.mp4'))
-        .map(f =>
-          `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${f.path}`
-        );
+        .map(f => `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${f.path}`);
+    }
+
+    function updateProgress(done, total) {
+      const pct = total ? (done / total) * 100 : 0;
+      document.getElementById('progress-bar').style.width = pct + '%';
+      document.getElementById('progress-text').textContent = `${done} / ${total}`;
+    }
+
+    // Fetch a single video URL into a blob, return a blob URL
+    async function fetchBlob(url) {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    }
+
+    // Load all videos into RAM as blob URLs, with progress tracking
+    async function preloadAllBlobs(urls) {
+      const blobUrls = new Array(urls.length).fill(null);
+      let done = 0;
+      updateProgress(0, urls.length);
+
+      await Promise.all(
+        urls.map(async (url, i) => {
+          try {
+            blobUrls[i] = await fetchBlob(url);
+          } catch (e) {
+            blobUrls[i] = null;
+          }
+          done++;
+          updateProgress(done, urls.length);
+        })
+      );
+
+      return blobUrls;
+    }
+
+    // Get video dimensions from a blob URL
+    function getVideoDimensions(blobUrl) {
+      return new Promise(resolve => {
+        const v = document.createElement('video');
+        v.src = blobUrl;
+        v.preload = 'metadata';
+        v.onloadedmetadata = () => resolve({
+          blobUrl,
+          w: v.videoWidth,
+          h: v.videoHeight,
+          aspect: v.videoWidth / v.videoHeight
+        });
+        v.onerror = () => resolve(null);
+      });
     }
 
     async function loadVideos() {
-      const urls = await getVideos();
-      const gallery = document.getElementById('gallery');
+      document.getElementById('loading-label').textContent = 'Fetching list…';
+      const urls = await getVideoUrls();
 
+      document.getElementById('loading-label').textContent = 'Loading videos…';
+      const blobUrls = await preloadAllBlobs(urls);
+
+      document.getElementById('loading-label').textContent = 'Reading metadata…';
       const metas = await Promise.all(
-        urls.map(url => new Promise(resolve => {
-          const video = document.createElement('video');
-          video.src = url;
-          video.preload = 'metadata';
-
-          video.onloadedmetadata = () => {
-            resolve({
-              url,
-              w: video.videoWidth,
-              h: video.videoHeight,
-              aspect: video.videoWidth / video.videoHeight
-            });
-          };
-
-          video.onerror = () => resolve(null);
-        }))
+        blobUrls.filter(Boolean).map(getVideoDimensions)
       );
 
       renderRows(metas.filter(Boolean));
+
       document.getElementById('loading').style.display = 'none';
+      const gallery = document.getElementById('gallery');
       gallery.style.opacity = 1;
     }
 
@@ -135,7 +203,7 @@
 
       for (const vid of rowVids) {
         const el = document.createElement('video');
-        el.src = vid.url;
+        el.src = vid.blobUrl;  // use in-memory blob URL
         el.width = height * vid.aspect;
         el.height = height;
 
@@ -143,9 +211,7 @@
         el.loop = true;
         el.muted = true;
         el.playsInline = true;
-        el.preload = 'metadata';
 
-        // 🔊 HOVER SOUND LOGIC
         el.addEventListener('mouseenter', () => {
           el.muted = false;
           el.volume = 1.0;
@@ -170,4 +236,3 @@
   </script>
 </body>
 </html>
-

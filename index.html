@@ -14,6 +14,7 @@
       color: white;
       font-family: sans-serif;
       zoom: 0.9;
+      overflow-x: hidden;
     }
 
     #gallery {
@@ -22,21 +23,23 @@
       justify-content: center;
       padding: 4px;
       opacity: 0;
-      transition: opacity 0.4s ease-in-out;
+      transition: opacity 1.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .row {
       display: flex;
-      justify-content: center;
+      justify-content: center; /* Centers the last row if it doesn't fill the width */
       margin-bottom: 4px;
+      width: 100%;
+      gap: 4px;
     }
 
     video {
-      margin: 2px;
       display: block;
-      object-fit: contain;
-      background: #000;
+      object-fit: cover; /* Changed to cover for a cleaner 'hole-filling' look */
+      background: #111;
       cursor: pointer;
+      border-radius: 2px;
     }
 
     #loading {
@@ -52,7 +55,7 @@
       z-index: 9999;
       gap: 20px;
       opacity: 1;
-      transition: opacity 0.5s ease-in-out;
+      transition: opacity 0.8s ease-in-out;
       pointer-events: none;
     }
 
@@ -69,7 +72,7 @@
       width: 0%;
       background: #fff;
       border-radius: 2px;
-      transition: width 0.15s ease;
+      transition: width 0.2s ease;
     }
 
     #progress-text {
@@ -96,9 +99,7 @@
     const branch = 'main';
 
     async function getVideoUrls() {
-      const res = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`
-      );
+      const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`);
       const data = await res.json();
       return data.tree
         .filter(f => f.type === 'blob' && f.path.toLowerCase().endsWith('.mp4'))
@@ -112,127 +113,66 @@
         v.preload = 'auto';
         v.muted = true;
         v.playsInline = true;
+        v.setAttribute('muted', '');
+        v.setAttribute('playsinline', '');
         v.loop = true;
         v.onloadedmetadata = () => resolve({
-          url,
-          el: v,
-          w: v.videoWidth,
-          h: v.videoHeight,
-          aspect: v.videoWidth / v.videoHeight
+          url, el: v, w: v.videoWidth, h: v.videoHeight, aspect: v.videoWidth / v.videoHeight
         });
         v.onerror = () => resolve(null);
       });
     }
 
-    function waitForBuffer(vidObj, targetFraction) {
+    function waitForBuffer(vidObj) {
       return new Promise(resolve => {
         const v = vidObj.el;
-
-        function check() {
-          if (!v.duration) return;
-          if (v.readyState >= 4) { resolve(); return; }
-          if (v.buffered.length > 0) {
-            const bufferedEnd = v.buffered.end(v.buffered.length - 1);
-            if (bufferedEnd / v.duration >= targetFraction) {
-              resolve();
-              return;
-            }
-          }
-        }
-
-        v.addEventListener('progress', check);
-        v.addEventListener('canplaythrough', resolve, { once: true });
+        const check = () => {
+          if (v.readyState >= 3) resolve();
+          else requestAnimationFrame(check);
+        };
+        v.addEventListener('canplay', resolve, { once: true });
         check();
       });
     }
 
-    function updateProgress(done, total) {
-      const pct = total ? (done / total) * 100 : 0;
-      document.getElementById('progress-bar').style.width = pct + '%';
-      document.getElementById('progress-text').textContent = `${done} / ${total} videos buffered`;
-    }
-
     async function loadVideos() {
-      document.getElementById('loading-label').textContent = 'Fetching list…';
       const urls = await getVideoUrls();
+      let metas = (await Promise.all(urls.map(getMetadata))).filter(Boolean);
 
-      document.getElementById('loading-label').textContent = 'Buffering videos…';
-      updateProgress(0, urls.length);
-
-      // Kick off metadata + preload='auto' for ALL videos simultaneously
-      const metas = (await Promise.all(urls.map(getMetadata))).filter(Boolean);
+      // Sort: Landscape (wider) first, Portrait (narrower) last
+      metas.sort((a, b) => b.aspect - a.aspect);
 
       let done = 0;
-      updateProgress(0, metas.length);
+      const total = metas.length;
+      document.getElementById('progress-text').textContent = `0 / ${total}`;
 
-      // Wait for every video to hit 50% buffered, track progress as each finishes
-      await Promise.all(
-        metas.map(async vid => {
-          await waitForBuffer(vid, 0.5);
-          done++;
-          updateProgress(done, metas.length);
-        })
-      );
+      await Promise.all(metas.map(async vid => {
+        await waitForBuffer(vid);
+        done++;
+        document.getElementById('progress-bar').style.width = (done/total*100) + '%';
+        document.getElementById('progress-text').textContent = `${done} / ${total} ready`;
+      }));
 
-      // Build gallery DOM (reuses the already-buffering video elements)
       renderRows(metas);
 
-      // Play all at once before revealing so first frame is ready
-      for (const vid of metas) {
-        vid.el.play().catch(() => {});
-      }
+      metas.forEach(vid => vid.el.play().catch(() => {}));
 
-      // Retry loop: every 600ms re-attempt play() on any video that's still paused
-      // Stops once all are playing or after 10 seconds
-      const retryStart = Date.now();
-      const retryInterval = setInterval(() => {
-        let anyPaused = false;
-        for (const vid of metas) {
-          const el = vid.el;
-          if (el.paused && !el.ended && el.error === null) {
-            el.play().catch(() => {});
-            anyPaused = true;
-          }
-        }
-        if (!anyPaused || Date.now() - retryStart > 10000) {
-          clearInterval(retryInterval);
-        }
-      }, 600);
-
-      // Crossfade: both transitions run simultaneously
       const loadingEl = document.getElementById('loading');
       const galleryEl = document.getElementById('gallery');
-
-      loadingEl.style.opacity = '0';
       galleryEl.style.opacity = '1';
-
-      loadingEl.addEventListener('transitionend', () => {
-        loadingEl.style.display = 'none';
-      }, { once: true });
-
-      // After 1.5s check for frozen/black videos (loaded metadata but stream broken)
       setTimeout(() => {
-        let anyRemoved = false;
-        for (const vid of metas) {
-          const el = vid.el;
-          const frozen = el.currentTime === 0 && !el.paused && !el.ended;
-          const errored = el.error !== null;
-          if (frozen || errored) {
-            const row = el.closest('.row');
-            if (row) { row.remove(); anyRemoved = true; }
-          }
-        }
-      }, 1500);
-      // Each video continues buffering the remaining 50% in the background automatically
+        loadingEl.style.opacity = '0';
+        setTimeout(() => { loadingEl.style.display = 'none'; }, 800);
+      }, 200);
     }
 
     function renderRows(videos) {
       const gallery = document.getElementById('gallery');
       gallery.innerHTML = '';
-
-      const targetRowHeight = 220;
+      const targetRowHeight = 240;
+      const maxRowHeight = 320; // Prevents portrait videos from becoming huge
       const containerWidth = gallery.clientWidth || window.innerWidth;
-
+      
       let row = [];
       let aspectSum = 0;
 
@@ -240,51 +180,45 @@
         row.push(vid);
         aspectSum += vid.aspect;
 
-        if (containerWidth / aspectSum < targetRowHeight * 1.2) {
-          addRow(row, containerWidth, aspectSum);
+        // If current row is full enough to reach target height
+        if (containerWidth / aspectSum < targetRowHeight) {
+          addRow(row, containerWidth, aspectSum, maxRowHeight);
           row = [];
           aspectSum = 0;
         }
       }
-
-      if (row.length) addRow(row, containerWidth, aspectSum);
+      
+      // Last row logic: don't stretch to full width if it's too tall
+      if (row.length) {
+        let lastRowHeight = containerWidth / aspectSum;
+        if (lastRowHeight > maxRowHeight) {
+          addRow(row, containerWidth, aspectSum, maxRowHeight, true);
+        } else {
+          addRow(row, containerWidth, aspectSum, maxRowHeight, false);
+        }
+      }
     }
 
-    function addRow(rowVids, containerWidth, totalAspect) {
+    function addRow(rowVids, containerWidth, totalAspect, maxH, isLastRow = false) {
       const gallery = document.getElementById('gallery');
       const rowEl = document.createElement('div');
       rowEl.className = 'row';
-
-      const height = containerWidth / totalAspect;
+      
+      let height = containerWidth / totalAspect;
+      if (height > maxH) height = maxH; // Cap the height
 
       for (const vid of rowVids) {
         const el = vid.el;
-        el.width = height * vid.aspect;
-        el.height = height;
-        el.autoplay = false;
-        el.muted = true;
-
-        el.addEventListener('mouseenter', () => {
-          el.muted = false;
-          el.volume = 1.0;
-        });
-        el.addEventListener('mouseleave', () => {
-          el.muted = true;
-        });
-
+        el.style.width = (height * vid.aspect) + 'px';
+        el.style.height = height + 'px';
+        el.addEventListener('mouseenter', () => { el.muted = false; el.volume = 1.0; });
+        el.addEventListener('mouseleave', () => { el.muted = true; });
         rowEl.appendChild(el);
       }
-
       gallery.appendChild(rowEl);
     }
-
-    window.addEventListener('resize', () => {
-      clearTimeout(window._resizeTimer);
-      window._resizeTimer = setTimeout(loadVideos, 300);
-    });
 
     loadVideos();
   </script>
 </body>
 </html>
-

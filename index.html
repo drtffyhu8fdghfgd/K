@@ -182,6 +182,23 @@
         vid.el.play().catch(() => {});
       }
 
+      // Retry loop: every 600ms re-attempt play() on any video that's still paused
+      // Stops once all are playing or after 10 seconds
+      const retryStart = Date.now();
+      const retryInterval = setInterval(() => {
+        let anyPaused = false;
+        for (const vid of metas) {
+          const el = vid.el;
+          if (el.paused && !el.ended && el.error === null) {
+            el.play().catch(() => {});
+            anyPaused = true;
+          }
+        }
+        if (!anyPaused || Date.now() - retryStart > 10000) {
+          clearInterval(retryInterval);
+        }
+      }, 600);
+
       // Crossfade: both transitions run simultaneously
       const loadingEl = document.getElementById('loading');
       const galleryEl = document.getElementById('gallery');
@@ -192,6 +209,20 @@
       loadingEl.addEventListener('transitionend', () => {
         loadingEl.style.display = 'none';
       }, { once: true });
+
+      // After 1.5s check for frozen/black videos (loaded metadata but stream broken)
+      setTimeout(() => {
+        let anyRemoved = false;
+        for (const vid of metas) {
+          const el = vid.el;
+          const frozen = el.currentTime === 0 && !el.paused && !el.ended;
+          const errored = el.error !== null;
+          if (frozen || errored) {
+            const row = el.closest('.row');
+            if (row) { row.remove(); anyRemoved = true; }
+          }
+        }
+      }, 1500);
       // Each video continues buffering the remaining 50% in the background automatically
     }
 
@@ -256,3 +287,4 @@
   </script>
 </body>
 </html>
+
